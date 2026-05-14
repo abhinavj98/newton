@@ -434,6 +434,33 @@ def _d6_fully_free_structural_slots_are_inactive(test, device):
     np.testing.assert_array_equal(solver.joint_is_hard.numpy()[start : start + 2], [0, 0])
 
 
+def _gather_joint_wrench_child_com_finite_after_step(test, device):
+    """:meth:`SolverVBD.gather_joint_wrench_child_com` returns finite wrenches after one step."""
+    builder = newton.ModelBuilder(gravity=-9.81)
+    parent = builder.add_link()
+    child = builder.add_link()
+    j0 = builder.add_joint_fixed(parent=-1, child=parent)
+    j1 = builder.add_joint_fixed(parent=parent, child=child)
+    builder.add_shape_box(parent, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_shape_box(child, hx=0.05, hy=0.05, hz=0.05)
+    builder.add_articulation([j0, j1])
+    builder.color()
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverVBD(model, iterations=2)
+    s0 = model.state()
+    s1 = model.state()
+    ctrl = model.control()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+    dt = 1.0e-3
+    q_prev = wp.clone(s0.body_q)
+    solver.step(s0, s1, ctrl, None, dt)
+    f_np, t_np = solver.gather_joint_wrench_child_com(model, s1.body_q, q_prev, [j1], dt, control=ctrl)
+    test.assertEqual(f_np.shape, (1, 3))
+    test.assertEqual(t_np.shape, (1, 3))
+    test.assertTrue(np.isfinite(f_np).all())
+    test.assertTrue(np.isfinite(t_np).all())
+
+
 def _rigid_contact_history_snapshot_copies_active_rows(test, device):
     """Snapshot writes solved state by active contact row and leaves inactive rows untouched."""
     with wp.ScopedDevice(device):
@@ -617,6 +644,12 @@ add_function_test(
     TestSolverVBD,
     "test_d6_fully_free_structural_slots_are_inactive",
     _d6_fully_free_structural_slots_are_inactive,
+    devices=devices,
+)
+add_function_test(
+    TestSolverVBD,
+    "test_gather_joint_wrench_child_com_finite_after_step",
+    _gather_joint_wrench_child_com_finite_after_step,
     devices=devices,
 )
 add_function_test(

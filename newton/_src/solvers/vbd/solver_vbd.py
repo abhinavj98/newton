@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -64,6 +65,7 @@ from .rigid_vbd_kernels import (
     compute_cable_dahl_parameters,
     compute_rigid_contact_forces,
     forward_step_rigid_bodies,
+    gather_joint_wrench_child_at_com_kernel,
     init_body_body_contact_materials,
     init_body_body_contacts_avbd,
     init_body_particle_contacts,
@@ -2711,6 +2713,116 @@ class SolverVBD(SolverBase):
             contacts.rigid_contact_force,
             contacts.rigid_contact_count,
         )
+
+    def gather_joint_wrench_child_com(
+        self,
+        model: Model,
+        body_q: Any,
+        body_q_prev: Any,
+        joint_indices: Sequence[int] | np.ndarray,
+        dt: float,
+        control: Control | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Query AVBD joint wrenches on each joint's child body at COM (world frame).
+
+        For each joint index ``j`` in ``joint_indices``, evaluates the same joint
+        force/torque pair that :func:`evaluate_joint_force_hessian` contributes to
+        ``body_index == joint_child[j]`` during the rigid AVBD solve.
+
+        Args:
+            model: The :class:`~newton.Model` bound to this solver (must match ``self.model``).
+            body_q: Current body transforms ``wp.array[wp.transform]`` or host array convertible
+                to that shape (e.g. ``state_out.body_q`` after :meth:`step`).
+            body_q_prev: Body transforms at the **start** of the same step (world frame), e.g. a
+                clone of ``state_in.body_q`` taken before :meth:`step`, consistent with
+                :meth:`collect_rigid_contact_forces`.
+            joint_indices: Joint indices ``j`` to query (length ``N``).
+            dt: Time step size [s] used for the solve that produced ``body_q`` / solver dual state.
+            control: Optional :class:`~newton.Control`; defaults to ``model.control(clone_variables=False)``.
+
+        Returns:
+            (force_world, torque_world): each ``numpy.ndarray`` of shape ``(N, 3)`` float32 — linear
+            force [N] and torque about child COM [N·m] in world frame for each queried joint.
+
+        Raises:
+            ValueError: If ``model`` is not this solver's model, or if rigid bodies are disabled.
+        """
+        if model is not self.model:
+            raise ValueError("gather_joint_wrench_child_com: model must be the Model passed to SolverVBD().")
+        if model.body_count == 0 or self.integrate_with_external_rigid_solver:
+            raise ValueError("gather_joint_wrench_child_com requires VBD-integrated rigid bodies on this model.")
+
+        n = len(joint_indices)
+        if n == 0:
+            z = np.zeros((0, 3), dtype=np.float32)
+            return z, z
+
+        if control is None:
+            control = model.control(clone_variables=False)
+
+        device = self.device
+
+        def _as_body_q(x: Any) -> wp.array:
+            if isinstance(x, wp.array):
+                if x.dtype != wp.transform:
+                    raise TypeError("body_q / body_q_prev must be wp.array(dtype=wp.transform) or numpy-like.")
+                return x.to(device) if x.device != device else x
+            return wp.array(x, dtype=wp.transform, device=device)
+
+        body_q_d = _as_body_q(body_q)
+        body_q_prev_d = _as_body_q(body_q_prev)
+        j_idx = wp.array(np.asarray(joint_indices, dtype=np.int32), dtype=wp.int32, device=device)
+        out_f = wp.zeros(n, dtype=wp.vec3, device=device)
+        out_t = wp.zeros(n, dtype=wp.vec3, device=device)
+
+        wp.launch(
+            kernel=gather_joint_wrench_child_at_com_kernel,
+            dim=n,
+            inputs=[
+                j_idx,
+                body_q_d,
+                body_q_prev_d,
+                model.body_q,
+                model.body_com,
+                model.joint_type,
+                model.joint_enabled,
+                model.joint_parent,
+                model.joint_child,
+                model.joint_X_p,
+                model.joint_X_c,
+                model.joint_axis,
+                model.joint_qd_start,
+                self.joint_constraint_start,
+                self.joint_penalty_k,
+                self.joint_penalty_kd,
+                self.joint_sigma_start,
+                self.joint_C_fric,
+                model.joint_target_ke,
+                model.joint_target_kd,
+                control.joint_target_pos,
+                control.joint_target_vel,
+                model.joint_limit_lower,
+                model.joint_limit_upper,
+                model.joint_limit_ke,
+                model.joint_limit_kd,
+                self.joint_lambda_lin,
+                self.joint_lambda_ang,
+                self.joint_C0_lin,
+                self.joint_C0_ang,
+                self.joint_is_hard,
+                float(self.rigid_joint_alpha),
+                model.joint_dof_dim,
+                self.joint_rest_angle,
+                float(dt),
+                out_f,
+                out_t,
+            ],
+            device=device,
+        )
+
+        f_np = out_f.numpy().reshape((n, 3))
+        t_np = out_t.numpy().reshape((n, 3))
+        return f_np.astype(np.float32, copy=False), t_np.astype(np.float32, copy=False)
 
     def _finalize_particles(self, state_out: State, dt: float):
         """Finalize particle velocities after VBD iterations."""

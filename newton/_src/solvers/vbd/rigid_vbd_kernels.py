@@ -1755,6 +1755,96 @@ def evaluate_joint_force_hessian(
     return _zero_force_hessian()
 
 
+@wp.kernel
+def gather_joint_wrench_child_at_com_kernel(
+    joint_indices: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_q_rest: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    joint_type: wp.array[int],
+    joint_enabled: wp.array[bool],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_qd_start: wp.array[wp.int32],
+    joint_constraint_start: wp.array[wp.int32],
+    joint_penalty_k: wp.array[float],
+    joint_penalty_kd: wp.array[float],
+    joint_sigma_start: wp.array[wp.vec3],
+    joint_C_fric: wp.array[wp.vec3],
+    joint_target_ke: wp.array[float],
+    joint_target_kd: wp.array[float],
+    joint_target_pos: wp.array[float],
+    joint_target_vel: wp.array[float],
+    joint_limit_lower: wp.array[float],
+    joint_limit_upper: wp.array[float],
+    joint_limit_ke: wp.array[float],
+    joint_limit_kd: wp.array[float],
+    joint_lambda_lin: wp.array[wp.vec3],
+    joint_lambda_ang: wp.array[wp.vec3],
+    joint_C0_lin: wp.array[wp.vec3],
+    joint_C0_ang: wp.array[wp.vec3],
+    joint_is_hard: wp.array[wp.int32],
+    avbd_alpha: float,
+    joint_dof_dim: wp.array2d[int],
+    joint_rest_angle: wp.array[float],
+    dt: float,
+    out_force: wp.array[wp.vec3],
+    out_torque: wp.array[wp.vec3],
+):
+    """Per queried joint: wrench (force, torque about child COM, world frame) on the child body.
+
+    Uses :func:`evaluate_joint_force_hessian` with ``body_index == joint_child[j]`` so the
+    returned pair matches the AVBD joint contribution assembled during ``solve_rigid_body``.
+    """
+    tid = wp.tid()
+    j = joint_indices[tid]
+    child = joint_child[j]
+    f_w, t_w, _hll, _hal, _haa = evaluate_joint_force_hessian(
+        child,
+        j,
+        body_q,
+        body_q_prev,
+        body_q_rest,
+        body_com,
+        joint_type,
+        joint_enabled,
+        joint_parent,
+        joint_child,
+        joint_X_p,
+        joint_X_c,
+        joint_axis,
+        joint_qd_start,
+        joint_constraint_start,
+        joint_penalty_k,
+        joint_penalty_kd,
+        joint_sigma_start,
+        joint_C_fric,
+        joint_target_ke,
+        joint_target_kd,
+        joint_target_pos,
+        joint_target_vel,
+        joint_limit_lower,
+        joint_limit_upper,
+        joint_limit_ke,
+        joint_limit_kd,
+        joint_lambda_lin,
+        joint_lambda_ang,
+        joint_C0_lin,
+        joint_C0_ang,
+        joint_is_hard,
+        avbd_alpha,
+        joint_dof_dim,
+        joint_rest_angle,
+        dt,
+    )
+    out_force[tid] = f_w
+    out_torque[tid] = t_w
+
+
 # -----------------------------
 # Utility kernels
 # -----------------------------
